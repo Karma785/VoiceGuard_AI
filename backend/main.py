@@ -1,11 +1,17 @@
 """
-VoiceGuard AI - FastAPI Backend
-Real-Time Deepfake Voice Detection System
-SIH26104 - Smart India Hackathon
+VoiceGuard AI — FastAPI Application Entry Point
+===================================================
+SIH26104 — Smart India Hackathon 2026
+Offline-First Edge AI Voice Cloning Detection System
 
-WebSocket endpoint that accepts binary audio chunks,
-runs mock MFCC/CQCC feature extraction, and returns
-detection results in real-time.
+This module assembles the FastAPI application:
+  1. Registers global middleware (CORS, error handling, rate limiting)
+  2. Includes API routers (auth, scans, reports)
+  3. Manages MongoDB connection lifecycle (startup/shutdown)
+  4. Preserves the WebSocket endpoint for real-time audio streaming
+
+Run:
+    uvicorn main:app --reload --host 0.0.0.0 --port 8000
 """
 
 import json
@@ -17,12 +23,37 @@ from typing import Dict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
+from config.database import connect_to_mongo, close_mongo_connection, get_db
+from config.settings import settings
+from middleware.error_handler import error_handler_middleware
+from middleware.rate_limit import rate_limit_middleware
+from models.user import ensure_user_indexes
+from models.scan_log import ensure_scan_indexes
+from models.evidence_report import ensure_evidence_indexes
+from routes.auth import router as auth_router
+from routes.scans import router as scans_router
+from routes.reports import router as reports_router
+
+# ---------------------------------------------------------------------------
+# Application factory
+# ---------------------------------------------------------------------------
 app = FastAPI(
     title="VoiceGuard AI Backend",
-    description="Real-Time Deepfake Voice Detection API",
-    version="1.0.0",
+    description=(
+        "Offline-First Edge AI Voice Cloning Detection System\n"
+        "SIH26104 — Smart India Hackathon 2026\n\n"
+        "Provides JWT authentication, offline scan log sync, "
+        "acoustic verification logging, and tamper-proof evidence "
+        "report generation with digital signatures."
+    ),
+    version="2.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
 )
 
+# ---------------------------------------------------------------------------
+# Middleware (order matters: error handler wraps everything)
+# ---------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,11 +62,74 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.middleware("http")(error_handler_middleware)
+app.middleware("http")(rate_limit_middleware)
 
 # ---------------------------------------------------------------------------
-# Mock AI Analysis Engine
+# Router registration
 # ---------------------------------------------------------------------------
+app.include_router(auth_router)
+app.include_router(scans_router)
+app.include_router(reports_router)
 
+
+# ---------------------------------------------------------------------------
+# Lifespan — connect to MongoDB and create indexes on startup
+# ---------------------------------------------------------------------------
+@app.on_event("startup")
+async def startup():
+    """Initialise database connection and create indexes."""
+    await connect_to_mongo()
+    db = get_db()
+    await ensure_user_indexes(db)
+    await ensure_scan_indexes(db)
+    await ensure_evidence_indexes(db)
+    # Index for acoustic verification logs
+    await db.acoustic_verification_logs.create_index(
+        [("user_id", 1), ("timestamp", -1)], name="idx_av_user_timestamp"
+    )
+    print("[VoiceGuard] All indexes created. Server ready.")
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    """Close database connection on shutdown."""
+    await close_mongo_connection()
+
+
+# ---------------------------------------------------------------------------
+# Health & info endpoints
+# ---------------------------------------------------------------------------
+@app.get("/")
+async def root():
+    return {
+        "service": "VoiceGuard AI Backend",
+        "version": "2.0.0",
+        "project_id": "SIH26104",
+        "status": "operational",
+        "endpoints": {
+            "docs": "/docs",
+            "health": "/health",
+            "auth": "/auth",
+            "scans": "/scans",
+            "reports": "/reports",
+            "websocket": "/ws/audio",
+        },
+    }
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "healthy",
+        "ai_engine": "ready",
+        "database": "connected",
+    }
+
+
+# ---------------------------------------------------------------------------
+# WebSocket endpoint — real-time audio stream analysis (preserved from v1)
+# ---------------------------------------------------------------------------
 class MockAIEngine:
     """
     Simulates real-time voice clone detection using MFCC and CQCC features.
@@ -46,38 +140,27 @@ class MockAIEngine:
     3. Extract CQCC (Constant Q Cepstral Coefficients)
     4. Feed features into a trained classifier (e.g., ResNet, LSTM)
     5. Return the deepfake probability
-
-    For this prototype, we simulate the analysis with realistic
-    feature distributions that escalate over the duration of a call.
     """
 
     def __init__(self):
         self.chunk_counters: Dict[str, int] = {}
 
     def analyze(self, session_id: str, chunk_data: bytes) -> dict:
-        """Analyze a single audio chunk and return detection results."""
         if session_id not in self.chunk_counters:
             self.chunk_counters[session_id] = 0
         self.chunk_counters[session_id] += 1
         chunk_index = self.chunk_counters[session_id]
 
-        # Simulate feature extraction with realistic patterns
-        # Risk tends to escalate as more chunks are analyzed
         base_score = 30 + (chunk_index * 0.4)
-        wave = random.sin(chunk_index * 0.3) * 15 if hasattr(random, 'sin') else 0
         noise = random.uniform(-15, 20)
-        confidence = max(5, min(98, base_score + noise + wave))
+        confidence = max(5, min(98, base_score + noise))
 
-        # Simulated MFCC deviation (0.0 - 0.8)
         mfcc_deviation = round(random.uniform(0.15, 0.75), 3)
-
-        # Simulated CQCC spectral tilt (-0.2 - 0.3)
         cqcc_tilt = round(random.uniform(-0.18, 0.28), 3)
-
-        # Simulated pitch consistency (0.4 - 0.95)
         pitch_consistency = round(random.uniform(0.45, 0.92), 3)
+        spectral_flux = round(random.uniform(0.01, 0.5), 3)
+        frequency_variation = round(random.uniform(0.01, 0.3), 3)
 
-        # Determine if cloned based on confidence and feature anomalies
         is_cloned = confidence > 60 or mfcc_deviation > 0.5
 
         return {
@@ -87,6 +170,8 @@ class MockAIEngine:
                 "mfcc_deviation": mfcc_deviation,
                 "cqcc_tilt": cqcc_tilt,
                 "pitch_consistency": pitch_consistency,
+                "spectral_flux": spectral_flux,
+                "frequency_variation": frequency_variation,
             },
             "chunk_index": chunk_index,
             "timestamp": time.time() * 1000,
@@ -100,56 +185,16 @@ class MockAIEngine:
 ai_engine = MockAIEngine()
 
 
-# ---------------------------------------------------------------------------
-# REST Endpoints
-# ---------------------------------------------------------------------------
-
-@app.get("/")
-async def root():
-    return {
-        "service": "VoiceGuard AI Backend",
-        "version": "1.0.0",
-        "status": "operational",
-        "websocket_endpoint": "/ws/audio",
-        "endpoints": {
-            "health": "/health",
-            "websocket": "/ws/audio",
-        },
-    }
-
-
-@app.get("/health")
-async def health():
-    return {"status": "healthy", "ai_engine": "ready"}
-
-
-# ---------------------------------------------------------------------------
-# WebSocket Endpoint
-# ---------------------------------------------------------------------------
-
 @app.websocket("/ws/audio")
 async def audio_stream(websocket: WebSocket):
     """
     WebSocket endpoint for real-time audio stream analysis.
 
     Protocol:
-    - Client connects and sends a JSON handshake: {"action": "start", "session_id": "..."}
+    - Client connects and sends JSON handshake: {"action": "start", "session_id": "..."}
     - Client sends binary audio chunks (1-second segments)
     - Server responds with JSON detection results for each chunk
     - Client sends {"action": "stop"} to end the session
-
-    Detection result format:
-    {
-        "is_cloned": bool,
-        "confidence_score": float,
-        "extracted_features": {
-            "mfcc_deviation": float,
-            "cqcc_tilt": float,
-            "pitch_consistency": float
-        },
-        "chunk_index": int,
-        "timestamp": float
-    }
     """
     await websocket.accept()
 
@@ -190,7 +235,7 @@ async def audio_stream(websocket: WebSocket):
 
     except WebSocketDisconnect:
         ai_engine.reset(session_id)
-    except Exception as e:
+    except Exception:
         ai_engine.reset(session_id)
 
 
